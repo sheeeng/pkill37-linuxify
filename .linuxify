@@ -1,64 +1,200 @@
-BREW_HOME=$(brew --prefix)
+#!/bin/bash
+# Source this file in Bash or Zsh to prefer Homebrew's GNU alternatives.
+# Execute it to manage installation. No shell options are changed when sourced.
 
-# most programs
-export PATH="${BREW_HOME}/bin:$PATH"
-export MANPATH="${BREW_HOME}/share/man:$MANPATH"
-export INFOPATH="${BREW_HOME}/share/info:$INFOPATH"
+_linuxify_prepend() {
+    local current rest part filtered='' separator=''
+    eval 'current=${'"$1"'-}'
+    if [ -z "$current" ]; then
+        export "$1=$2"
+        return
+    fi
+    rest=$current
+    while :; do
+        part=${rest%%:*}
+        if [ "$part" != "$2" ]; then
+            filtered="$filtered$separator$part"
+            separator=:
+        fi
+        case "$rest" in
+            *:*) rest=${rest#*:} ;;
+            *) break ;;
+        esac
+    done
+    export "$1=$2${separator:+:$filtered}"
+}
 
-# coreutils
-export PATH="${BREW_HOME}/opt/coreutils/libexec/gnubin:$PATH"
-export MANPATH="${BREW_HOME}/opt/coreutils/libexec/gnuman:$MANPATH"
+_linuxify_flag() {
+    local current flag
+    eval 'current=${'"$1"'-}'
+    flag="$2\"$3\""
+    case " $current " in
+        *" $flag "*) ;;
+        *) export "$1=$flag${current:+ $current}" ;;
+    esac
+}
 
-# make
-export PATH="${BREW_HOME}/opt/make/libexec/gnubin:$PATH"
-export MANPATH="${BREW_HOME}/opt/make/libexec/gnuman:$MANPATH"
+_linuxify_main() {
+    local mode=$1 source_file=$2 brew_command='' prefix='' candidate formula dir
+    local -a formulas paths
+    shift 2
+    formulas=(
+        watch wget wdiff autoconf tree
+        coreutils binutils diffutils ed findutils gawk gnu-indent gnu-sed
+        gnu-tar gnu-which gnu-getopt grep gzip screen
+        bash emacs gpatch less m4 make nano bison flex
+        libressl gnutls gnupg file-formula git openssh perl python rsync unzip vim
+    )
 
-# m4
-export PATH="${BREW_HOME}/opt/m4/bin:$PATH"
+    if [ "$mode" = execute ]; then
+        if [ "$#" -gt 1 ]; then
+            printf '%s\n' 'Usage: .linuxify [install|uninstall|info|--help]' >&2
+            return 1
+        fi
+        case "${1---help}" in
+            -h|--help)
+                printf '%s\n' 'Usage: .linuxify [install|uninstall|info|--help]' \
+                    '  install    Install missing packages and copy this file to ~/.linuxify' \
+                    '  uninstall  Remove ~/.linuxify; keep Homebrew packages' \
+                    '  info       Show Homebrew information for the package list' \
+                    'Source ~/.linuxify to activate the environment in Bash or Zsh.'
+                return 0 ;;
+            uninstall)
+                command rm -f "$HOME/.linuxify" || return
+                printf '%s\n' 'Removed ~/.linuxify. Homebrew packages remain installed.' \
+                    'Remove its source line from your shell config; open a new shell to clear the environment.'
+                return 0 ;;
+            install|info) ;;
+            *) printf 'Unknown command: %s\n' "$1" >&2; return 1 ;;
+        esac
+    fi
 
-# file-formula
-export PATH="${BREW_HOME}/opt/file-formula/bin:$PATH"
+    case "${OSTYPE-}" in
+        darwin*) ;;
+        *) printf '%s\n' 'linuxify requires macOS.' >&2; return 1 ;;
+    esac
 
-# unzip
-export PATH="${BREW_HOME}/opt/unzip/bin:$PATH"
+    # Respect the selected Homebrew installation, including custom prefixes.
+    if [ -n "${HOMEBREW_PREFIX-}" ]; then
+        prefix=$HOMEBREW_PREFIX
+        [ ! -x "$prefix/bin/brew" ] || brew_command="$prefix/bin/brew"
+    else
+        brew_command=$(command -v brew 2>/dev/null) || brew_command=''
+        if [ -z "$brew_command" ]; then
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+                if [ -x "$candidate" ]; then
+                    brew_command=$candidate
+                    break
+                fi
+            done
+        fi
+        if [ -n "$brew_command" ]; then
+            prefix=$("$brew_command" --prefix) || return
+        fi
+    fi
+    if [ -z "$prefix" ] || [ ! -d "$prefix" ]; then
+        printf '%s\n' 'Homebrew not found. Install it from https://brew.sh or set HOMEBREW_PREFIX.' >&2
+        return 1
+    fi
 
-# python
-export PATH="${BREW_HOME}/opt/python/libexec/bin:$PATH"
+    if [ "$mode" = execute ]; then
+        if [ -z "$brew_command" ]; then
+            printf 'Homebrew executable not found at %s/bin/brew.\n' "$prefix" >&2
+            return 1
+        fi
+        case "$(uname -m)" in x86_64) formulas+=(gdb) ;; esac
+        if [ "$1" = info ]; then
+            "$brew_command" info "${formulas[@]}"
+            return
+        fi
+        for formula in "${formulas[@]}"; do
+            if "$brew_command" list --versions "$formula" >/dev/null 2>&1; then
+                printf 'Already installed: %s\n' "$formula"
+            else
+                printf 'Installing: %s\n' "$formula"
+                "$brew_command" install "$formula" || return
+            fi
+        done
+        if [ ! "$source_file" -ef "$HOME/.linuxify" ]; then
+            command cp "$source_file" "$HOME/.linuxify" || return
+        fi
+        printf '%s\n' 'Add this line to ~/.bashrc or ~/.zshrc (after other PATH settings):' \
+            '[ ! -f "$HOME/.linuxify" ] || . "$HOME/.linuxify"' \
+            'For Bash login shells, ensure ~/.bash_profile sources ~/.bashrc.'
+        return 0
+    fi
 
-# flex
-export PATH="${BREW_HOME}/opt/flex/bin:$PATH"
-export LDFLAGS="-L${BREW_HOME}/opt/flex/lib"
-export CPPFLAGS="-I${BREW_HOME}/opt/flex/include"
+    # Build in priority order, then prepend in reverse order. Only existing
+    # directories participate; stable opt symlinks survive Homebrew upgrades.
+    # The guarded array expansions also work with Bash 3.2 nounset.
+    paths=()
+    for formula in "${formulas[@]}"; do
+        dir="$prefix/opt/$formula/libexec/gnubin"
+        [ ! -d "$dir" ] || paths=("$dir" ${paths[@]+"${paths[@]}"})
+    done
+    dir="$prefix/opt/python/libexec/bin"
+    [ ! -d "$dir" ] || paths=("$dir" ${paths[@]+"${paths[@]}"})
+    for formula in "${formulas[@]}"; do
+        dir="$prefix/opt/$formula/bin"
+        [ ! -d "$dir" ] || paths=("$dir" ${paths[@]+"${paths[@]}"})
+    done
+    for dir in "$prefix/bin" "$prefix/sbin"; do
+        [ ! -d "$dir" ] || paths=("$dir" ${paths[@]+"${paths[@]}"})
+    done
+    for dir in ${paths[@]+"${paths[@]}"}; do
+        _linuxify_prepend PATH "$dir"
+    done
 
-# bison
-export PATH="${BREW_HOME}/opt/bison/bin:$PATH"
-export LDFLAGS="-L${BREW_HOME}/opt/bison/lib"
+    # A trailing colon preserves man/info's default system search paths.
+    export MANPATH="${MANPATH:-:}" INFOPATH="${INFOPATH:-:}"
+    for dir in "$prefix/share/man" "$prefix/share/info"; do
+        if [ -d "$dir" ]; then
+            case "$dir" in
+                */man) _linuxify_prepend MANPATH "$dir" ;;
+                */info) _linuxify_prepend INFOPATH "$dir" ;;
+            esac
+        fi
+    done
+    for formula in "${formulas[@]}"; do
+        for dir in "$prefix/opt/$formula/share/man" "$prefix/opt/$formula/libexec/gnuman"; do
+            [ ! -d "$dir" ] || _linuxify_prepend MANPATH "$dir"
+        done
+        dir="$prefix/opt/$formula/share/info"
+        [ ! -d "$dir" ] || _linuxify_prepend INFOPATH "$dir"
+    done
+    for formula in flex bison libressl; do
+        dir="$prefix/opt/$formula/lib"
+        [ ! -d "$dir" ] || _linuxify_flag LDFLAGS -L "$dir"
+    done
+    for formula in flex libressl; do
+        dir="$prefix/opt/$formula/include"
+        [ ! -d "$dir" ] || _linuxify_flag CPPFLAGS -I "$dir"
+    done
+    dir="$prefix/opt/libressl/lib/pkgconfig"
+    [ ! -d "$dir" ] || _linuxify_prepend PKG_CONFIG_PATH "$dir"
+    return 0
+}
 
-# libressl
-export PATH="${BREW_HOME}/opt/libressl/bin:$PATH"
-export LDFLAGS="-L${BREW_HOME}/opt/libressl/lib"
-export CPPFLAGS="-I${BREW_HOME}/opt/libressl/include"
-export PKG_CONFIG_PATH="${BREW_HOME}/opt/libressl/lib/pkgconfig"
+_linuxify_entry() {
+    local result=0
+    _linuxify_main "$@" || result=$?
+    # A startup-file diagnostic must not terminate shells using errexit.
+    [ "$1" != source ] || result=0
+    unset -f _linuxify_main _linuxify_prepend _linuxify_flag _linuxify_entry
+    return "$result"
+}
 
-# ed
-export PATH="${BREW_HOME}/opt/ed/libexec/gnubin:$PATH"
-
-# findutils
-export PATH="${BREW_HOME}/opt/findutils/libexec/gnubin:$PATH"
-
-# gnu-indent
-export PATH="${BREW_HOME}/opt/gnu-indent/libexec/gnubin:$PATH"
-
-# gnu-sed
-export PATH="${BREW_HOME}/opt/gnu-sed/libexec/gnubin:$PATH"
-
-# gnu-tar
-export PATH="${BREW_HOME}/opt/gnu-tar/libexec/gnubin:$PATH"
-
-# gnu-which
-export PATH="${BREW_HOME}/opt/gnu-which/libexec/gnubin:$PATH"
-
-# grep
-export PATH="${BREW_HOME}/opt/grep/libexec/gnubin:$PATH"
-
-unset BREW_HOME
+if [ -n "${ZSH_VERSION-}" ]; then
+    case $ZSH_EVAL_CONTEXT in
+        *:file) _linuxify_entry source "${(%):-%x}" ;;
+        *) _linuxify_entry execute "$0" "$@" ;;
+    esac
+elif [ -n "${BASH_VERSION-}" ]; then
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+        _linuxify_entry source "${BASH_SOURCE[0]}"
+    else
+        _linuxify_entry execute "$0" "$@"
+    fi
+else
+    printf '%s\n' 'linuxify supports Bash and Zsh.' >&2
+fi
